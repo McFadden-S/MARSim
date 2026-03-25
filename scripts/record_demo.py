@@ -20,7 +20,6 @@ except ImportError:
     print("Pillow is required: pip install Pillow")
     sys.exit(1)
 
-import io
 import numpy as np
 import torch
 import pygame
@@ -52,7 +51,7 @@ def record_demo(
     env = make_MARSim(GridConfig(num_agents=50, size=50, density=0.0, map=bf.map))
 
     r = env.grid_config.obs_radius
-    obs_dim = 2 + (2 * r + 1) ** 2
+    obs_dim = 2 + 2 + 2 * (2 * r + 1) ** 2
     act_dim = len(env.grid_config.MOVES)
 
     friendly_policy = PPO(observation_shape=obs_dim, action_shape=act_dim)
@@ -95,6 +94,11 @@ def record_demo(
         if en_idx.numel() > 0:
             en_actions, _, _, _ = enemy_policy.step(obs_tensor[en_idx])
             joint_actions[en_idx] = en_actions.view(-1)
+
+        # Feed drone obstacle data to UGV A* agent
+        drone_data = env.unwrapped.get_drone_obstacle_data()
+        ugv_agent.update_from_drones(drone_data)
+
         if ugv_idx.numel() > 0:
             for k in ugv_idx.tolist():
                 if steps % ugv_action_skip == 0:

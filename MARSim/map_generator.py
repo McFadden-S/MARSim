@@ -5,6 +5,10 @@ Generates corridor-style maps using a "treeline" architecture: vertical
 columns of rectangular fields separated by walls, with entrances carved
 between adjacent fields and columns to ensure connectivity.
 
+After generation, a BFS connectivity check guarantees at least one
+traversable path from the left third to the right third of the map
+(the UGV spawn zone to its target zone).
+
 Usage::
 
     bf = Battlefield()          # 50x50 default
@@ -13,6 +17,7 @@ Usage::
 """
 
 import random
+from collections import deque
 
 
 class Battlefield:
@@ -25,6 +30,9 @@ class Battlefield:
     horizontally (between adjacent columns).  After all fields are placed,
     remaining walls are randomly removed until *target_open_ratio* of
     cells are free, ensuring the map is largely traversable.
+
+    A final connectivity pass guarantees a path from the left third to
+    the right third of the map.
 
     Attributes:
         map: list[list[int]] — the generated grid (0 = free, 1 = wall).
@@ -49,6 +57,7 @@ class Battlefield:
         # Initialise as all walls, then carve out fields
         self.map: list[list[int]] = [[1] * width for _ in range(height)]
         self._generate_fields()
+        self._ensure_left_right_path()
 
     # ------------------------------------------------------------------
     # Map generation
@@ -153,6 +162,74 @@ class Battlefield:
                 break
             self.map[y][x] = 0
             open_cells += 1
+
+    # ------------------------------------------------------------------
+    # Path guarantee
+    # ------------------------------------------------------------------
+
+    def _ensure_left_right_path(self):
+        """
+        Guarantee at least one path from the left third to the right third.
+
+        Uses BFS from every free cell in the left third.  If no cell in the
+        right third is reachable, carve a corridor along the BFS parent
+        chain toward the right, breaking through walls as needed.
+        """
+        left_bound = self.width // 3
+        right_bound = 2 * self.width // 3
+
+        # Collect free cells in the left third as BFS seeds
+        seeds = []
+        for r in range(self.height):
+            for c in range(left_bound):
+                if self.map[r][c] == 0:
+                    seeds.append((r, c))
+
+        if not seeds:
+            # No free cells on the left at all — carve a horizontal line
+            mid_r = self.height // 2
+            for c in range(self.width):
+                self.map[mid_r][c] = 0
+            return
+
+        # BFS from all left-third free cells
+        visited = set(seeds)
+        parent = {}
+        queue = deque(seeds)
+        reached_right = False
+
+        while queue:
+            r, c = queue.popleft()
+            if c >= right_bound:
+                reached_right = True
+                break
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.height and 0 <= nc < self.width and (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    parent[(nr, nc)] = (r, c)
+                    if self.map[nr][nc] == 0:
+                        queue.append((nr, nc))
+                    else:
+                        # Wall — add to queue with high priority (BFS still
+                        # explores it, but we prefer free cells first so we
+                        # append walls to the right end)
+                        queue.append((nr, nc))
+
+        if reached_right:
+            # A path exists through mixed free/wall cells — carve it
+            cur = (r, c)
+            while cur in parent:
+                cr, cc = cur
+                self.map[cr][cc] = 0
+                cur = parent[cur]
+            return
+
+        # BFS couldn't reach the right third at all (shouldn't happen with
+        # wall traversal above, but as a fallback carve a horizontal line)
+        mid_r = self.height // 2
+        for c in range(self.width):
+            self.map[mid_r][c] = 0
 
     # ------------------------------------------------------------------
     # Display helpers

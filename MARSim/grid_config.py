@@ -65,6 +65,8 @@ REWARD_UGV_ENEMY_BONUS    = 100.0   # enemy team bonus when UGV is destroyed
 REWARD_UGV_ENEMY_PENALTY  = -100.0  # enemy team penalty when UGV succeeds
 REWARD_DEFENCE_SCALE      =  0.05   # scale of the UGV-defence proximity term
 REWARD_DEFENCE_THRESHOLD  =  0.10   # normalised distance danger threshold
+REWARD_ENEMY_APPROACH     =  0.1    # enemy shaping: reward for closing distance to UGV
+REWARD_ENEMY_SPOT_UGV     =  5.0    # enemy bonus for detecting the UGV specifically
 
 
 # ── Dummy target sentinel ────────────────────────────────────────────────────
@@ -104,7 +106,7 @@ class GridConfig:
         self.on_target: Literal["finish", "nothing", "restart"] = "finish"
         self.seed: Optional[int] = None
         self.density: float = 0.3
-        self.obs_radius: int = 5
+        self.obs_radius: int = 3
         self.agents_xy: Optional[list] = None
         self.targets_xy: Optional[list] = None
 
@@ -119,7 +121,7 @@ class GridConfig:
         self.persistent: bool = False
         self.map: Optional[Union[list, str]] = None
 
-        self.max_episode_steps: int = 200
+        self.max_episode_steps: int = 500
 
         # Override defaults with any kwargs supplied by the caller
         self.__dict__.update(kwargs)

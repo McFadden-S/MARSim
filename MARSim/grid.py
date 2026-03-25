@@ -7,6 +7,7 @@ observation windows never go out-of-bounds.
 """
 
 from copy import deepcopy
+import math
 import warnings
 
 import numpy as np
@@ -389,3 +390,101 @@ class Grid:
             raise KeyError("The cell is already occupied.")
         self.positions[self.positions_xy[agent_id]] = self.config.OBSTACLE
         return True
+
+    # ------------------------------------------------------------------
+    # Cone masks and shared vision
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_cone_masks(obs_radius, cone_half_angle_deg=45):
+        """
+        Precompute boolean visibility masks for each movement direction.
+
+        Returns a dict mapping action index (0-4) to a (2r+1, 2r+1) bool array.
+        Action 0 (stay / no previous direction) gives full visibility.
+        """
+        r = obs_radius
+        size = 2 * r + 1
+        dir_vectors = {
+            0: None,       # stay → full view
+            1: (-1, 0),    # North
+            2: (1, 0),     # South
+            3: (0, -1),    # West
+            4: (0, 1),     # East
+        }
+        cos_thresh = math.cos(math.radians(cone_half_angle_deg))
+        masks = {}
+        for action, dv in dir_vectors.items():
+            mask = np.zeros((size, size), dtype=bool)
+            mask[r, r] = True  # own cell always visible
+            if dv is None:
+                mask[:] = True
+                masks[action] = mask
+                continue
+            dx, dy = dv
+            for i in range(size):
+                for j in range(size):
+                    ci, cj = i - r, j - r
+                    if ci == 0 and cj == 0:
+                        continue
+                    mag = math.sqrt(ci * ci + cj * cj)
+                    cos_angle = (dx * ci + dy * cj) / mag
+                    if cos_angle >= cos_thresh:
+                        mask[i, j] = True
+            masks[action] = mask
+        return masks
+
+    def get_true_obstacles_for_agent(self, agent_id):
+        """Return real obstacle patch regardless of agent type (for drone scouting)."""
+        x, y = self.positions_xy[agent_id]
+        r = self.config.obs_radius
+        return self.obstacles[x - r:x + r + 1, y - r:y + r + 1].astype(np.float32)
+
+    def build_global_agent_grid(self):
+        """Build full-grid array encoding agent types for all active agents."""
+        TYPE_VALUES = {
+            AgentType.FRIENDLY_UAV: 1.0,
+            AgentType.ENEMY_UAV:    2.0,
+            AgentType.FRIENDLY_UGV: 3.0,
+            AgentType.ENEMY_UGV:    4.0,
+        }
+        grid = np.zeros(self.obstacles.shape, dtype=np.float32)
+        for idx, (ax, ay) in enumerate(self.positions_xy):
+            if self.is_active[idx]:
+                grid[ax, ay] = TYPE_VALUES.get(self.config.agent_types[idx], 0.5)
+        return grid
+
+    def build_team_visibility(self, team_indices, effective_directions, cone_masks):
+        """Return a boolean mask of cells visible to any active team member."""
+        r = self.config.obs_radius
+        visible = np.zeros(self.obstacles.shape, dtype=bool)
+        for idx in team_indices:
+            if not self.is_active[idx]:
+                continue
+            x, y = self.positions_xy[idx]
+            direction = effective_directions[idx]
+            cone = cone_masks[direction]
+            x0, x1 = x - r, x + r + 1
+            y0, y1 = y - r, y + r + 1
+            gx0, gy0 = max(0, x0), max(0, y0)
+            gx1 = min(visible.shape[0], x1)
+            gy1 = min(visible.shape[1], y1)
+            lx0, ly0 = gx0 - x0, gy0 - y0
+            visible[gx0:gx1, gy0:gy1] |= cone[lx0:lx0 + (gx1 - gx0), ly0:ly0 + (gy1 - gy0)]
+        return visible
+
+    def get_patch_centered_on(self, agent_id, full_grid, pad_value=0.0):
+        """Extract a (2r+1)x(2r+1) patch from *full_grid* centered on the agent."""
+        x, y = self.positions_xy[agent_id]
+        r = self.config.obs_radius
+        size = 2 * r + 1
+        patch = np.full((size, size), pad_value, dtype=np.float32)
+        x_min = max(0, x - r)
+        x_max = min(full_grid.shape[0], x + r + 1)
+        y_min = max(0, y - r)
+        y_max = min(full_grid.shape[1], y + r + 1)
+        lx0 = x_min - (x - r)
+        ly0 = y_min - (y - r)
+        patch[lx0:lx0 + (x_max - x_min), ly0:ly0 + (y_max - y_min)] = \
+            full_grid[x_min:x_max, y_min:y_max]
+        return patch

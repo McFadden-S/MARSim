@@ -30,7 +30,7 @@ def main():
 
     # --- Policy setup ---
     r = env.grid_config.obs_radius
-    obs_dim = 2 + (2 * r + 1) ** 2
+    obs_dim = 2 + 2 + 2 * (2 * r + 1) ** 2
     act_dim = len(env.grid_config.MOVES)
 
     friendly_agents = PPO(observation_shape=obs_dim, action_shape=act_dim)
@@ -94,6 +94,10 @@ def main():
                 en_value = torch.empty(0, dtype=torch.float32)
                 if en_idx.numel() > 0:
                     en_actions, en_logp, _, en_value = enemy_agents.step(obs_tensor[en_idx])
+
+                # --- Feed drone obstacle data to UGV A* agent ---
+                drone_data = env.unwrapped.get_drone_obstacle_data()
+                ugv_agent.update_from_drones(drone_data)
 
                 # --- UGV actions (A* planner, with action skip) ---
                 ugv_actions_np = []

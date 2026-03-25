@@ -9,6 +9,7 @@ and four different collision resolution systems.
 from typing import Optional
 from collections import defaultdict
 
+import numpy as np
 import gymnasium
 
 from MARSim.grid import Grid
@@ -25,6 +26,8 @@ from MARSim.grid_config import (
     REWARD_UGV_ENEMY_PENALTY,
     REWARD_DEFENCE_SCALE,
     REWARD_DEFENCE_THRESHOLD,
+    REWARD_ENEMY_APPROACH,
+    REWARD_ENEMY_SPOT_UGV,
 )
 from MARSim.wrappers.multi_time_limit import MultiTimeLimit
 from MARSim.graphics import PygameRenderer
@@ -36,10 +39,12 @@ class MARSim(gymnasium.Env):
     Multi-agent resupply environment.
 
     **Observation space** (per agent):
-        - ``obstacles``: (2r+1, 2r+1) binary grid of nearby terrain.
-        - ``agents``:    (2r+1, 2r+1) type-encoded agent positions.
-        - ``xy``:        absolute (row, col) position.
-        - ``target_xy``: goal position (or sentinel for UAVs).
+        - ``agents``:          (2r+1, 2r+1) cone-masked agent positions.
+        - ``team_agents``:     (2r+1, 2r+1) shared team vision patch.
+        - ``obstacles``:       (2r+1, 2r+1) binary grid of nearby terrain.
+        - ``xy``:              absolute (row, col) position.
+        - ``target_xy``:       goal position (or sentinel for UAVs).
+        - ``ugv_relative_xy``: (dx, dy) vector from drone to friendly UGV.
 
     **Action space**: Discrete(5) — stay / N / S / W / E.
 
@@ -57,14 +62,37 @@ class MARSim(gymnasium.Env):
         self.was_on_goal: Optional[list[bool]] = None
         self.agent_types = list(self.grid_config.agent_types)
 
+        # Precompute cone masks (shared across episodes)
+        self._cone_masks = Grid.build_cone_masks(self.grid_config.obs_radius)
+
+        # Per-agent state (reset each episode)
+        self._effective_directions: Optional[list[int]] = None
+        self._last_actions: Optional[list[int]] = None
+
+        # Team index caches (constant for env lifetime)
+        self._friendly_indices = [
+            i for i, t in enumerate(self.agent_types)
+            if t in (AgentType.FRIENDLY_UAV, AgentType.FRIENDLY_UGV)
+        ]
+        self._enemy_indices = [
+            i for i, t in enumerate(self.agent_types)
+            if t in (AgentType.ENEMY_UAV, AgentType.ENEMY_UGV)
+        ]
+        self._ugv_index = next(
+            (i for i, t in enumerate(self.agent_types) if t == AgentType.FRIENDLY_UGV),
+            None,
+        )
+
         # Gymnasium spaces
         self.action_space = gymnasium.spaces.Discrete(len(self.grid_config.MOVES))
         full_size = self.grid_config.obs_radius * 2 + 1
         self.observation_space = gymnasium.spaces.Dict(
             obstacles=gymnasium.spaces.Box(0.0, 1.0, shape=(full_size, full_size)),
             agents=gymnasium.spaces.Box(0.0, 1.0, shape=(full_size, full_size)),
+            team_agents=gymnasium.spaces.Box(0.0, 1.0, shape=(full_size, full_size)),
             xy=gymnasium.spaces.Box(low=-1024, high=1024, shape=(2,), dtype=int),
             target_xy=gymnasium.spaces.Box(low=-1024, high=1024, shape=(2,), dtype=int),
+            ugv_relative_xy=gymnasium.spaces.Box(low=-1024, high=1024, shape=(2,), dtype=int),
         )
 
         # Rendering
@@ -91,6 +119,12 @@ class MARSim(gymnasium.Env):
         """
         assert len(action) == self.grid_config.num_agents
 
+        # Update effective directions (last non-zero action per agent)
+        for i, a in enumerate(action):
+            self._last_actions[i] = a
+            if a != 0:
+                self._effective_directions[i] = a
+
         # Snapshot active status before movement to detect destruction events
         prev_active = list(self.grid.is_active.values())
 
@@ -105,6 +139,7 @@ class MARSim(gymnasium.Env):
                 targets_xy=self.grid.finishes_xy,
                 agent_types=self.agent_types,
                 is_active=[not t for t in terminated],
+                effective_directions=self._effective_directions,
             )
 
         return self._obs(), rewards, terminated, [False] * self.grid_config.num_agents, self._get_infos()
@@ -141,6 +176,10 @@ class MARSim(gymnasium.Env):
                 # --- Defence shaping (friendly UAVs only) ---
                 if agent_type == AgentType.FRIENDLY_UAV:
                     reward += self._defence_reward()
+
+                # --- Approach shaping (enemy UAVs: reward for closing on UGV) ---
+                if agent_type == AgentType.ENEMY_UAV:
+                    reward += self._enemy_approach_reward(idx)
 
             # --- Destruction events ---
             if prev_active[idx] and not self.grid.is_active[idx]:
@@ -192,6 +231,9 @@ class MARSim(gymnasium.Env):
                     reward += 1.0
                 else:
                     reward += 1.0 / (manhattan / detection_radius)
+                # Extra bonus for spotting the UGV specifically
+                if other_type == AgentType.FRIENDLY_UGV:
+                    reward += REWARD_ENEMY_SPOT_UGV
 
         return reward
 
@@ -230,6 +272,24 @@ class MARSim(gymnasium.Env):
         else:
             # Inside danger zone — increasingly negative as s -> 0
             return -k * 10 * (1.0 - (s / thresh))
+
+    def _enemy_approach_reward(self, enemy_idx: int) -> float:
+        """
+        Per-step shaping that rewards enemy UAVs for being close to the UGV.
+
+        Returns a positive reward that increases as the enemy gets closer,
+        incentivising pursuit of the high-value target.
+        """
+        if self._ugv_index is None or not self.grid.is_active[self._ugv_index]:
+            return 0.0
+
+        ugv_pos = self.grid.positions_xy[self._ugv_index]
+        enemy_pos = self.grid.positions_xy[enemy_idx]
+        dist = abs(ugv_pos[0] - enemy_pos[0]) + abs(ugv_pos[1] - enemy_pos[1])
+
+        max_dist = max(1, 2 * (self.grid.config.size - 1))
+        # Reward is higher when closer: scale * (1 - normalised_distance)
+        return REWARD_ENEMY_APPROACH * (1.0 - dist / max_dist)
 
     def _apply_terminal_rewards_impl(self, rewards: list[float],
                                      terminated: list[bool], success: bool):
@@ -275,6 +335,11 @@ class MARSim(gymnasium.Env):
         self.update_was_on_goal()
         self.display_graphics = display_graphics
 
+        # Reset per-agent tracking
+        n = self.grid_config.num_agents
+        self._effective_directions = [0] * n  # 0 → full visibility initially
+        self._last_actions = [0] * n
+
         if self.display_graphics:
             if self.graphics is None:
                 self.graphics = PygameRenderer(
@@ -287,15 +352,16 @@ class MARSim(gymnasium.Env):
                 agents_xy=self.grid.positions_xy,
                 targets_xy=self.grid.finishes_xy,
                 agent_types=self.agent_types,
-                is_active=[True] * self.grid_config.num_agents,
+                is_active=[True] * n,
+                effective_directions=self._effective_directions,
             )
 
         if seed is not None:
             self.grid.seed = seed
 
         # Reset per-episode reward-shaping state
-        self._visited_cells = [set() for _ in range(self.grid_config.num_agents)]
-        self._detected_opponents = [set() for _ in range(self.grid_config.num_agents)]
+        self._visited_cells = [set() for _ in range(n)]
+        self._detected_opponents = [set() for _ in range(n)]
 
         if return_info:
             return self._obs(), self._get_infos()
@@ -307,21 +373,85 @@ class MARSim(gymnasium.Env):
 
     def _obs(self) -> list[dict]:
         """Build a list of observation dicts, one per agent."""
-        return [
-            {
-                "obstacles": self.grid.get_obstacles_for_agent(i),
-                "agents": self.grid.get_positions(i),
-                "xy": self.grid.positions_xy[i],
-                "target_xy": self.grid.finishes_xy[i],
-            }
-            for i in range(self.grid_config.num_agents)
-        ]
+        r = self.grid_config.obs_radius
+
+        # Build global agent-type grid once
+        global_agents = self.grid.build_global_agent_grid()
+
+        # Shared team visibility masks
+        friendly_vis = self.grid.build_team_visibility(
+            self._friendly_indices, self._effective_directions, self._cone_masks,
+        )
+        enemy_vis = self.grid.build_team_visibility(
+            self._enemy_indices, self._effective_directions, self._cone_masks,
+        )
+
+        # Shared agent grids (visible cells get type values, rest is 0)
+        friendly_shared = np.where(friendly_vis, global_agents, 0.0).astype(np.float32)
+        enemy_shared = np.where(enemy_vis, global_agents, 0.0).astype(np.float32)
+
+        # UGV position for relative vector
+        ugv_pos = None
+        if self._ugv_index is not None and self.grid.is_active[self._ugv_index]:
+            ugv_pos = self.grid.positions_xy[self._ugv_index]
+
+        obs_list = []
+        for i in range(self.grid_config.num_agents):
+            atype = self.agent_types[i]
+            xy = self.grid.positions_xy[i]
+            target_xy = self.grid.finishes_xy[i]
+            obstacles = self.grid.get_obstacles_for_agent(i)
+
+            # UGV-relative position (friendly UAVs only)
+            if atype == AgentType.FRIENDLY_UAV and ugv_pos is not None:
+                ugv_rel = (ugv_pos[0] - xy[0], ugv_pos[1] - xy[1])
+            else:
+                ugv_rel = (0, 0)
+
+            if atype.is_uav:
+                # Own cone-masked agents patch
+                direction = self._effective_directions[i]
+                cone_mask = self._cone_masks[direction]
+                raw_agents = self.grid.get_positions(i)
+                own_agents = np.where(cone_mask, raw_agents, 0.0).astype(np.float32)
+
+                # Team shared patch centered on this agent
+                shared_grid = friendly_shared if atype.is_friendly else enemy_shared
+                team_patch = self.grid.get_patch_centered_on(i, shared_grid)
+            else:
+                # UGV: full square observation, no cone
+                own_agents = self.grid.get_positions(i)
+                team_patch = self.grid.get_patch_centered_on(i, friendly_shared)
+
+            obs_list.append({
+                "obstacles": obstacles,
+                "agents": own_agents,
+                "team_agents": team_patch,
+                "xy": xy,
+                "target_xy": target_xy,
+                "ugv_relative_xy": ugv_rel,
+            })
+        return obs_list
 
     def _get_infos(self) -> list[dict]:
         return [
             {"is_active": self.grid.is_active[i]}
             for i in range(self.grid_config.num_agents)
         ]
+
+    # ------------------------------------------------------------------
+    # Drone obstacle data (for UGV A* pathfinding)
+    # ------------------------------------------------------------------
+
+    def get_drone_obstacle_data(self):
+        """Return (xy, obstacles_patch) for every active friendly UAV."""
+        data = []
+        for i, t in enumerate(self.agent_types):
+            if t == AgentType.FRIENDLY_UAV and self.grid.is_active[i]:
+                xy = self.grid.positions_xy[i]
+                patch = self.grid.get_true_obstacles_for_agent(i)
+                data.append((xy, patch))
+        return data
 
     # ------------------------------------------------------------------
     # Movement and collision systems

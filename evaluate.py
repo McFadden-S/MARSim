@@ -58,7 +58,7 @@ def evaluate(
     )
 
     r = env.grid_config.obs_radius
-    obs_dim = 2 + (2 * r + 1) ** 2
+    obs_dim = 2 + 2 + 2 * (2 * r + 1) ** 2
     act_dim = len(env.grid_config.MOVES)
 
     # --- Load trained policies ---
@@ -122,6 +122,10 @@ def evaluate(
             if en_idx.numel() > 0:
                 en_actions, _, _, _ = enemy_policy.step(obs_tensor[en_idx])
                 joint_actions[en_idx] = en_actions.view(-1)
+
+            # --- Feed drone obstacle data to UGV A* agent ---
+            drone_data = env.unwrapped.get_drone_obstacle_data()
+            ugv_agent.update_from_drones(drone_data)
 
             if ugv_idx.numel() > 0:
                 for k in ugv_idx.tolist():

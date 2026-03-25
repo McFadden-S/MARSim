@@ -226,6 +226,15 @@ class AStarAgent:
         self._last_action = None
         self._tabu.clear()
 
+    def update_from_drones(self, drone_observations):
+        """Feed obstacle patches from friendly drones into grid memory.
+
+        Args:
+            drone_observations: list of ((x, y), obstacles_patch) tuples.
+        """
+        for (x, y), patch in drone_observations:
+            self._gm.update(x, y, patch.astype(np.int8))
+
     def _strict_action_from_step(self, cur, nxt) -> int:
         dx, dy = (nxt[0] - cur[0], nxt[1] - cur[1])
         key = (dx, dy)
