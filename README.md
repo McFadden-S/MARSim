@@ -218,12 +218,6 @@ python evaluate.py \
 | `ugv_reached_goal`     | Whether the UGV successfully reached its target   |
 | `ugv_destroyed`        | Whether the UGV was destroyed                     |
 
-<p align="center">
-  <img src="docs/performance.png" alt="Performance Plots" width="700"/>
-  <br/>
-  <em>Training curves: friendly vs enemy reward, UGV success rate, and episode length over training updates.</em>
-</p>
-
 ## Configuration
 
 All environment parameters are centralised in `GridConfig`:
