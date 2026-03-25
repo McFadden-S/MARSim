@@ -40,8 +40,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/McFadden-S/EDTH-Hackathon.git
-cd EDTH-Hackathon
+git clone https://github.com/McFadden-S/MARSim.git
+cd MARSim
 
 # Install in development mode
 pip install -e .
@@ -305,7 +305,7 @@ If you use MARSim in your research, please cite:
   title={MARSim: Multi-Agent Resupply Simulator},
   author={McFadden, Shae},
   year={2025},
-  url={https://github.com/McFadden-S/EDTH-Hackathon}
+  url={https://github.com/McFadden-S/MARSim}
 }
 ```
 
