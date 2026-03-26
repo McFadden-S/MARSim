@@ -315,7 +315,7 @@ class MARSim(gymnasium.Env):
 
     def update_was_on_goal(self):
         self.was_on_goal = [
-            self.grid.on_goal(i) and self.grid.is_active[i]
+            self.grid.on_goal(i)
             for i in range(self.grid_config.num_agents)
         ]
 
