@@ -2,7 +2,7 @@
   <img src="docs/MARSim_logo.png" alt="MARSim Logo" width="512"/>
 </p>
 
-<h1 align="center">MARSim — Multi-Agent Resupply Simulator</h1>
+<h1 align="center">MARSim: Multi-Agent Resupply Simulator</h1>
 
 <p align="center">
   <a href="#installation">Installation</a> •
